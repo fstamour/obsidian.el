@@ -82,7 +82,7 @@
     If it is true, create in inbox, otherwise next to the current buffer."
   :type 'boolean)
 
-(defcustom obsidian-daily-notes-directory obsidian-inbox-directory 
+(defcustom obsidian-daily-notes-directory obsidian-inbox-directory
   "Subdir to create daily notes with `obsidian-daily-note'. Default: the inbox directory"
   :type 'directory)
 
@@ -153,9 +153,11 @@ When run interactively asks user to specify the path."
 ;; Copied from org-roam's org-roam-descendant-of-p
 (defun obsidian-descendant-of-p (a b)
   "Return t if A is descendant of B."
-  (unless (equal (file-truename a) (file-truename b))
-    (string-prefix-p (replace-regexp-in-string "^\\([A-Za-z]\\):" #'downcase (expand-file-name b) t t)
-                     (replace-regexp-in-string "^\\([A-Za-z]\\):" #'downcase (expand-file-name a) t t))))
+  (string-search ".." (file-relative-name a b))
+  ;; (unless (equal (file-truename a) (file-truename b)) (string-prefix-p (replace-regexp-in-string "^\\([A-Za-z]\\):" #'downcase (expand-file-name b) t t) (replace-regexp-in-string "^\\([A-Za-z]\\):" #'downcase (expand-file-name a) t t)))
+  )
+
+
 
 (defun obsidian-not-trash-p (file)
   "Return t if FILE is not in .trash of Obsidian."
@@ -185,15 +187,19 @@ FILE is an Org-roam file if:
 - Is not a dot file or, if `obsidian-include-hidden-files' is t, then:
   - It is not in .trash
   - It is not an Emacs temp file"
-  (-when-let* ((path (or file (-> (buffer-base-buffer) buffer-file-name)))
-               (relative-path (file-relative-name path obsidian-directory))
-               (ext (file-name-extension relative-path))
-               (md-p (string= ext "md"))
-               (obsidian-dir-p (obsidian-descendant-of-p path obsidian-directory))
+  (-when-let* ((path (or file (buffer-file-name (buffer-base-buffer))))
+               (_ (s-ends-with-p ".md" path))
+               ;; (not-node-modules-p (not (string-match-p (rx (or "node_modules" ".git")) path)))
+               ;; (not-ignored-p (not (magit-file-ignored-p path)))
+               ;; (relative-path (file-relative-name path obsidian-directory))
+               ;; (ext (file-name-extension relative-path))
+               ;; (md-p (string= ext "md"))
+               ;; (obsidian-dir-p (obsidian-descendant-of-p path obsidian-directory))
                (not-dot-file (or obsidian-include-hidden-files (not (obsidian-dot-file-p path))))
                (not-trash-p (obsidian-not-trash-p path))
                (not-dot-obsidian (obsidian-not-dot-obsidian-p path))
-               (not-temp-p (not (s-contains-p "~" relative-path))))
+               ;; (not-temp-p (not (s-contains-p "~" relative-path)))
+               )
     t))
 
 (defun obsidian--file-relative-name (f)
@@ -219,9 +225,20 @@ FILE is an Org-roam file if:
 
 (defun obsidian-reset-cache ()
   "Clear and reset obsidian cache."
+  ;; (setq obsidian-files-cache (->> (directory-files-recursively obsidian-directory "\.*$") (-filter #'obsidian-file-p)))
+  (fsta/comment
+   (setq obsidian-files-cache (directory-files-recursively
+                               ;; dir
+                               obsidian-directory
+                               ;; regexp
+                               "\.*\\.md$"
+                               ;; include-directories
+                               nil
+                               ;; predicate
+                               #'obsidian-file-p)))
   (setq obsidian-files-cache
-        (->> (directory-files-recursively obsidian-directory "\.*$")
-             (-filter #'obsidian-file-p)))
+        (cl-delete-if-not #'obsidian-file-p
+                          (projectile-dir-files-alien obsidian-directory)))
   (setq obsidian-cache-timestamp (float-time)))
 
 (defun obsidian-list-all-files ()
@@ -233,6 +250,8 @@ Obsidian notes files:
     (obsidian-reset-cache))
   obsidian-files-cache)
 
+
+
 (defun obsidian-clear-cache ()
   "Clears the obsidian.el cache.
 
@@ -243,8 +262,8 @@ If you need to run this manually, please report this as an issue on Github."
 
 (defun obsidian-list-all-directories ()
   "Lists all Obsidian sub folders."
-  (->> (directory-files-recursively obsidian-directory "" t)
-       (-filter #'obsidian-user-directory-p)))
+  ;; (->> (directory-files-recursively obsidian-directory "" t) (-filter #'obsidian-user-directory-p))
+  (directory-files-recursively obsidian-directory "" t #'obsidian-user-directory-p))
 
 (defun obsidian-read-file-or-buffer (&optional file)
   "Return string contents of a file or current buffer.
@@ -288,36 +307,33 @@ Return nil if the front matter does not exist, or incorrectly delineated by
 
 (defun obsidian--file-front-matter (file)
   "Check if FILE has front matter and returned parsed to hash-table if it does."
-  (let* ((starts-with-dashes-p (with-temp-buffer
-                                 (insert-file-contents file nil 0 3)
-                                 (string= (buffer-string) "---"))))
-    (if starts-with-dashes-p
-        (let* ((front-matter-s (with-temp-buffer
-                                 (insert-file-contents file)
-                                 (obsidian-get-yaml-front-matter))))
-          (if front-matter-s
-              (yaml-parse-string front-matter-s))))))
+  (with-temp-buffer
+    (insert-file-contents file)
+    (when (string= "---" (buffer-substring-no-properties 1 (min (point-max) 3)))
+      (when-let ((front-matter-s (obsidian-get-yaml-front-matter)))
+        (yaml-parse-string front-matter-s)))))
 
 (defun obsidian--update-from-front-matter (file)
   "Takes FILE, parse front matter then update anything that needs to be updated.
 
 At the moment updates only `obsidian--aliases-map' with found aliases."
-  (let* ((dict (obsidian--file-front-matter file)))
-    (if dict
-        (let* ((aliases (gethash 'aliases dict))
-               (alias (gethash 'alias dict))
-               (all-aliases (-filter #'identity (append aliases (list alias)))))
-          ;; Update aliases
-          (-map (lambda (al) (if al (progn
-                                      (obsidian--add-alias (format "%s" al) file)))) all-aliases)))))
+  (when-let* ((dict (obsidian--file-front-matter file)))
+    (let* ((aliases (gethash 'aliases dict))
+           (alias (gethash 'alias dict))
+           (all-aliases (cl-copy-list (append aliases (list alias)))))
+      ;; Update aliases
+      (when alias
+        (obsidian--add-alias (format "%s" al) file))
+      (map nil (lambda (al) (obsidian--add-alias (format "%s" al) file)) aliases))))
 
 (defun obsidian--update-all-from-front-matter ()
   "Take all files in obsidian vault, parse front matter and update."
-  (dolist (f (obsidian-list-all-files))
-    (condition-case err
-        (obsidian--update-from-front-matter f)
-      (error (message "Error updating YAML front matter in file %s. Error: %s"
-                      f (error-message-string err)))))
+  (fsta/measure-time
+   (dolist (f (obsidian-list-all-files))
+     (condition-case err
+         (obsidian--update-from-front-matter (file-name-concat obsidian-directory f))
+       (error (message "Error updating YAML front matter in file %s. Error: %s"
+                       f (error-message-string err))))))
   (message "Obsidian aliases updated."))
 
 (defun obsidian-tag-p (s)
@@ -329,21 +345,21 @@ At the moment updates only `obsidian--aliases-map' with found aliases."
   "Return all tags in file or current buffer.
 
 If FILE is not specified, use the current buffer"
-  (-> (obsidian-read-file-or-buffer file)
-      obsidian-find-tags
-      -distinct))
+  (obsidian-find-tags (obsidian-read-file-or-buffer file)) )
 
 (defun obsidian-list-all-tags ()
   "Find all tags in all obsidian files."
-  (->> (obsidian-list-all-files)
-       (mapcar #'obsidian-find-tags-in-file)
-       -flatten
-       -distinct))
+  (let ((tags (make-hash-table :test 'equal)))
+    (mapcar (lambda (file)
+              (mapcar (lambda (tag)
+                        (puthash tag tag tags))
+                      (obsidian-find-tags (obsidian-read-file-or-buffer file))))
+            (obsidian-list-all-files))
+    (hash-table-keys tags)))
 
 (defun obsidian-update-tags-list ()
   "Scans entire Obsidian vault and update all tags for completion."
-  (->> (obsidian-list-all-tags)
-       (setq obsidian--tags-list))
+  (setq obsidian--tags-list (obsidian-list-all-tags))
   (message "Obsidian tags updated"))
 
 (define-minor-mode obsidian-mode
